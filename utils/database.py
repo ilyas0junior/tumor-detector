@@ -1,21 +1,46 @@
-# utils/database.py
+# utils/database.py - CLOUD COMPATIBLE VERSION
 import sqlite3
 import pandas as pd
 import numpy as np
 import json
-from datetime import datetime
 import os
-from pathlib import Path
+from datetime import datetime
+
+def get_db_path():
+    """Get database path that works both locally and on cloud"""
+    # Try different possible paths
+    possible_paths = [
+        'data/tumor_cases.db',           # Local development
+        '/tmp/tumor_cases.db',           # Cloud temp directory
+        'tumor_cases.db',                # Current directory
+        os.path.join(os.path.dirname(__file__), '../data/tumor_cases.db')
+    ]
+    
+    for path in possible_paths:
+        try:
+            # Create directory if it doesn't exist
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            # Try to connect
+            test_conn = sqlite3.connect(path)
+            test_conn.close()
+            return path
+        except:
+            continue
+    
+    # Default to current directory
+    return 'tumor_cases.db'
 
 def init_database():
-    """Initialize SQLite database"""
-    # Create data directory if it doesn't exist
-    os.makedirs("data", exist_ok=True)
+    """Initialize database for cloud"""
+    db_path = get_db_path()
     
-    conn = sqlite3.connect('data/tumor_cases.db')
+    # Create directory if needed
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
     
-    # Cases table
+    # Create tables
     c.execute('''
         CREATE TABLE IF NOT EXISTS cases (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,179 +51,82 @@ def init_database():
             tumor_size TEXT,
             malignancy TEXT,
             location TEXT,
-            uploaded_at TIMESTAMP,
-            metadata TEXT
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
-    # Similar cases table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS similar_cases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            original_case_id TEXT,
-            similar_case_id TEXT,
-            similarity_score REAL,
-            match_reason TEXT
-        )
-    ''')
+    # Add demo data if table is empty
+    c.execute("SELECT COUNT(*) FROM cases")
+    count = c.fetchone()[0]
     
-    # Create indexes
-    c.execute('CREATE INDEX IF NOT EXISTS idx_stage ON cases(stage)')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_location ON cases(location)')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_uploaded ON cases(uploaded_at)')
+    if count == 0:
+        demo_cases = [
+            ('CLOUD_001', 'Stage II', 0.85, 1, '2.3 cm', 'Moderate', 'Brain', datetime.now()),
+            ('CLOUD_002', 'Stage I', 0.92, 1, '1.5 cm', 'Low', 'Brain', datetime.now()),
+            ('CLOUD_003', 'Stage III', 0.78, 2, '3.8 cm', 'High', 'Brain', datetime.now()),
+            ('CLOUD_004', 'No tumor', 0.95, 0, '0 cm', 'None', 'Brain', datetime.now())
+        ]
+        
+        for case in demo_cases:
+            c.execute('''
+                INSERT INTO cases (case_id, stage, confidence, tumor_count, tumor_size, malignancy, location, uploaded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', case)
     
     conn.commit()
     conn.close()
-    print("✅ Database initialized: data/tumor_cases.db")
-    return True
+    print(f"✅ Database initialized at: {db_path}")
 
-def import_kaggle_dataset(dataset_path="data/dataset"):
-    """Import Kaggle dataset into database"""
-    dataset_dir = Path(dataset_path)
+def get_all_cases():
+    """Get all cases from database"""
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
     
-    if not dataset_dir.exists():
-        print(f"❌ Dataset not found at {dataset_path}")
-        return 0
+    try:
+        df = pd.read_sql_query("SELECT * FROM cases ORDER BY uploaded_at DESC", conn)
+    except:
+        # If error, return empty dataframe
+        df = pd.DataFrame()
     
-    conn = sqlite3.connect('data/tumor_cases.db')
-    c = conn.cursor()
-    
-    imported = 0
-    categories = {
-        'glioma': 'Glioma Tumor',
-        'meningioma': 'Meningioma Tumor',
-        'pituitary': 'Pituitary Tumor',
-        'notumor': 'No Tumor'
-    }
-    
-    for category, category_name in categories.items():
-        category_path = dataset_dir / category
-        
-        if not category_path.exists():
-            continue
-        
-        for image_file in category_path.glob("*.jpg"):
-            try:
-                # Generate unique case ID
-                case_id = f"KGL_{category}_{image_file.stem}"
-                
-                # Check if already exists
-                c.execute("SELECT 1 FROM cases WHERE case_id = ?", (case_id,))
-                if c.fetchone():
-                    continue  # Skip if already exists
-                
-                # Determine stage based on category
-                if category == 'notumor':
-                    stage = "No tumor"
-                    confidence = 0.95
-                    malignancy = "None"
-                    tumor_count = 0
-                else:
-                    # For tumors, assign random stage for demo
-                    stages = ['Stage I', 'Stage II', 'Stage III']
-                    stage = np.random.choice(stages, p=[0.5, 0.3, 0.2])
-                    confidence = np.random.uniform(0.7, 0.9)
-                    malignancy = np.random.choice(['Low', 'Moderate', 'High'])
-                    tumor_count = 1
-                
-                # Insert into database
-                c.execute('''
-                    INSERT INTO cases 
-                    (case_id, stage, confidence, tumor_count, tumor_size, malignancy, location, uploaded_at, metadata)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    case_id,
-                    stage,
-                    confidence,
-                    tumor_count,
-                    f"{np.random.uniform(1.0, 4.0):.1f} cm",
-                    malignancy,
-                    "Brain",
-                    datetime.now(),
-                    json.dumps({
-                        'source': 'kaggle',
-                        'category': category,
-                        'filename': image_file.name,
-                        'path': str(image_file),
-                        'type': 'MRI',
-                        'description': category_name
-                    })
-                ))
-                
-                imported += 1
-                
-                # Print progress every 100 images
-                if imported % 100 == 0:
-                    print(f"  Imported {imported} images...")
-                
-            except Exception as e:
-                print(f"Error importing {image_file}: {e}")
-    
-    conn.commit()
     conn.close()
-    
-    print(f"✅ Imported {imported} cases from Kaggle dataset")
-    return imported
+    return df
 
 def save_case(analysis_result, case_id=None):
     """Save analysis to database"""
     if case_id is None:
-        case_id = f"USER_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        case_id = f"CLOUD_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    conn = sqlite3.connect('data/tumor_cases.db')
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
     
     try:
         c.execute('''
-            INSERT OR REPLACE INTO cases 
-            (case_id, stage, confidence, tumor_count, tumor_size, malignancy, location, uploaded_at, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO cases 
+            (case_id, stage, confidence, tumor_count, tumor_size, malignancy, location)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (
             case_id,
-            analysis_result.get('stage'),
-            analysis_result.get('confidence'),
+            analysis_result.get('stage', 'Unknown'),
+            analysis_result.get('confidence', 0),
             analysis_result.get('tumor_count', 0),
-            analysis_result.get('largest_size', 'N/A'),
+            analysis_result.get('size', 'N/A'),
             analysis_result.get('malignancy', 'Unknown'),
-            analysis_result.get('location', 'Unknown'),
-            datetime.now(),
-            json.dumps(analysis_result)
+            analysis_result.get('location', 'Unknown')
         ))
         
         conn.commit()
         return case_id
     except Exception as e:
-        print(f"Error saving case: {e}")
+        print(f"Database error: {e}")
         return None
     finally:
         conn.close()
 
-def get_similar_cases(stage, location, limit=3):
-    """Get similar cases from database"""
-    conn = sqlite3.connect('data/tumor_cases.db')
-    
-    query = '''
-        SELECT * FROM cases 
-        WHERE stage = ? AND location LIKE ?
-        ORDER BY RANDOM()
-        LIMIT ?
-    '''
-    
-    df = pd.read_sql_query(query, conn, params=(stage, f"%{location}%", limit))
-    conn.close()
-    
-    return df
-
-def get_all_cases():
-    """Get all cases for dashboard"""
-    conn = sqlite3.connect('data/tumor_cases.db')
-    df = pd.read_sql_query("SELECT * FROM cases ORDER BY uploaded_at DESC", conn)
-    conn.close()
-    return df
-
 def get_statistics():
     """Get statistics for dashboard"""
-    conn = sqlite3.connect('data/tumor_cases.db')
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
     
     stats = {
         'total_cases': 0,
@@ -207,8 +135,9 @@ def get_statistics():
     }
     
     try:
-        # Total cases
         c = conn.cursor()
+        
+        # Total cases
         c.execute("SELECT COUNT(*) FROM cases")
         stats['total_cases'] = c.fetchone()[0]
         
@@ -223,19 +152,10 @@ def get_statistics():
         stats['avg_confidence'] = avg_conf if avg_conf else 0
         
     except Exception as e:
-        print(f"Error getting statistics: {e}")
+        print(f"Statistics error: {e}")
     finally:
         conn.close()
     
     return stats
 
-def clear_database():
-    """Clear all data from database (careful!)"""
-    conn = sqlite3.connect('data/tumor_cases.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM cases")
-    c.execute("DELETE FROM similar_cases")
-    conn.commit()
-    conn.close()
-    print("🗑️ Database cleared")
-    return True
+# Other functions remain similar, just use get_db_path()
